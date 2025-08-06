@@ -18,34 +18,78 @@ from langchain.vectorstores import FAISS
 from langchain.embeddings import SentenceTransformerEmbeddings
 from langchain.memory import ConversationBufferWindowMemory
 import os
-from dotenv import load_dotenv
-load_dotenv()
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Load environment variables - handle both local and Cloud Run environments
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    logger.info("dotenv not available, using environment variables directly")
 
+# Get API keys from environment
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-genai.configure(api_key=GOOGLE_API_KEY)
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+if not GOOGLE_API_KEY:
+    logger.error("GOOGLE_API_KEY not found in environment variables")
+if not YOUTUBE_API_KEY:
+    logger.error("YOUTUBE_API_KEY not found in environment variables")
+
+# Configure APIs
+if GOOGLE_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+    genai.configure(api_key=GOOGLE_API_KEY)
+
 API_KEY = YOUTUBE_API_KEY
-genai.configure(api_key=GOOGLE_API_KEY)
 
-llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3, google_api_key=GOOGLE_API_KEY)
-embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
-
+# Initialize models with error handling
 global_qa_chain = None
 global_memory = None
 current_video_title = ""
+sentiment_pipe = None
+model = None
+llm = None
+embedding_model = None
 
-try:
-    sentiment_pipe = pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", device=-1)
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-except Exception as e:
-    print(f"Model loading error: {e}")
-    sentiment_pipe = None
-    model = None
+def initialize_models():
+    """Initialize ML models with error handling"""
+    global sentiment_pipe, model, llm, embedding_model
+    
+    try:
+        logger.info("Initializing models...")
+        
+        if GOOGLE_API_KEY:
+            llm = ChatGoogleGenerativeAI(
+                model="models/gemini-2.0-flash-exp",  # Use faster model for Cloud Run
+                temperature=0.3, 
+                google_api_key=GOOGLE_API_KEY
+            )
+            logger.info("LLM initialized successfully")
+        
+        embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+        logger.info("Embedding model initialized")
+        
+        sentiment_pipe = pipeline(
+            "sentiment-analysis", 
+            model="distilbert/distilbert-base-uncased-finetuned-sst-2-english", 
+            device=-1  # Use CPU
+        )
+        logger.info("Sentiment pipeline initialized")
+        
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("Sentence transformer initialized")
+        
+    except Exception as e:
+        logger.error(f"Model initialization error: {e}")
+        # Continue without models - the app can still function partially
+
+# Initialize models on startup
+initialize_models()
 
 def search_youtube(query, max_results=5):
     """Search YouTube videos and return results"""
@@ -64,6 +108,7 @@ def search_youtube(query, max_results=5):
                     "views": entry.get('view_count', 'N/A')
                 })
     except Exception as e:
+        logger.error(f"YouTube search error: {e}")
         return f"Error searching YouTube: {str(e)}"
 
     return videos
@@ -124,6 +169,7 @@ def fetch_transcript(video_id):
     except VideoUnavailable:
         return "Video unavailable."
     except Exception as e:
+        logger.error(f"Transcript fetch error: {e}")
         return f"Error: {str(e)}"
 
 def get_metadata_only(video_url):
@@ -145,11 +191,15 @@ def get_metadata_only(video_url):
     except subprocess.TimeoutExpired:
         return {"error": "yt-dlp timed out"}
     except Exception as e:
+        logger.error(f"Metadata extraction error: {e}")
         return {"error": f"yt-dlp error: {str(e)}"}
 
 def process_youtube_url(url):
     """Fetches transcript, metadata, and prepares the QA chain with memory."""
     global global_qa_chain, global_memory, current_video_title
+    
+    if not llm or not embedding_model:
+        return "Service temporarily unavailable - models not loaded", {}, "", "QA chatbot unavailable - API keys missing or models failed to load"
     
     video_id = extract_video_id(url)
     if not video_id:
@@ -162,31 +212,37 @@ def process_youtube_url(url):
     current_video_title = metadata.get('title', 'Unknown Video') if isinstance(metadata, dict) else 'Unknown Video'
 
     if isinstance(transcript, str) and not "Error" in transcript:
-        # Split transcript into chunks
-        splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=64)
-        chunks = splitter.split_text(transcript)
+        try:
+            # Split transcript into chunks
+            splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=64)
+            chunks = splitter.split_text(transcript)
 
-        # Create vector store
-        vector_store = FAISS.from_texts(chunks, embedding_model)
+            # Create vector store
+            vector_store = FAISS.from_texts(chunks, embedding_model)
 
-        # Initialize conversation memory with a window of last 10 exchanges
-        global_memory = ConversationBufferWindowMemory(
-            k=10,  # Keep last 10 conversation turns
-            memory_key="chat_history",
-            output_key="answer",
-            return_messages=True
-        )
+            # Initialize conversation memory with a window of last 10 exchanges
+            global_memory = ConversationBufferWindowMemory(
+                k=10,  # Keep last 10 conversation turns
+                memory_key="chat_history",
+                output_key="answer",
+                return_messages=True
+            )
 
-        # Create conversational retrieval chain with memory
-        global_qa_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
-            memory=global_memory,
-            return_source_documents=True,
-            verbose=True
-        )
-        
-        status_message = f"QA chatbot is ready! You can now ask questions about '{current_video_title}'"
+            # Create conversational retrieval chain with memory
+            global_qa_chain = ConversationalRetrievalChain.from_llm(
+                llm=llm,
+                retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
+                memory=global_memory,
+                return_source_documents=True,
+                verbose=True
+            )
+            
+            status_message = f"QA chatbot is ready! You can now ask questions about '{current_video_title}'"
+        except Exception as e:
+            logger.error(f"QA chain creation error: {e}")
+            global_qa_chain = None
+            global_memory = None
+            status_message = f"QA chatbot setup failed: {str(e)}"
     else:
         global_qa_chain = None
         global_memory = None
@@ -199,6 +255,9 @@ def process_youtube_url(url):
 
 def get_comments(video_id, api_key, max_results=20):
     """Get comments from a YouTube video"""
+    if not api_key:
+        return ["Error: YouTube API key not configured"]
+        
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
         request = youtube.commentThreads().list(
@@ -216,21 +275,26 @@ def get_comments(video_id, api_key, max_results=20):
 
         return comments
     except Exception as e:
+        logger.error(f"Comment fetch error: {e}")
         return [f"Error fetching comments: {str(e)}"]
 
 def analyze_comments(comments):
     """Analyze sentiment of comments"""
     if not sentiment_pipe:
-        return [(comment, {"label": "UNKNOWN", "score": 0}) for comment in comments]
+        return [(comment, {"label": "UNAVAILABLE", "score": 0}) for comment in comments]
 
     try:
         results = sentiment_pipe(comments, truncation=True)
         return list(zip(comments, results))
     except Exception as e:
+        logger.error(f"Sentiment analysis error: {e}")
         return [(comment, {"label": "ERROR", "score": 0}) for comment in comments]
 
 def generate_summary_and_anchors(transcript_text):
     """Generate summary and anchor comments using Gemini"""
+    if not GOOGLE_API_KEY:
+        return "Error: Google API key not configured"
+        
     try:
         prompt = f"""
         You are an intelligent assistant. Given a video transcript, generate the following:
@@ -259,6 +323,7 @@ def generate_summary_and_anchors(transcript_text):
         response = model_gen.generate_content(prompt)
         return response.text
     except Exception as e:
+        logger.error(f"Anchor generation error: {e}")
         return f"Error generating anchors: {str(e)}"
 
 def clean_gemini_output(raw_output):
@@ -301,6 +366,7 @@ def match_comments_to_anchors(user_comments, anchor_dict, top_k=1):
 
         return results
     except Exception as e:
+        logger.error(f"Comment matching error: {e}")
         return [{"comment": str(e), "matched_anchor": "", "category": "error", "score": 0}]
 
 def process_comments(video_url, max_comments):
@@ -375,6 +441,7 @@ Explanation: This comment was categorized as '{result['category']}' based on sem
         return sentiment_text, category_text
 
     except Exception as e:
+        logger.error(f"Comment analysis error: {e}")
         return f"Error analyzing comment: {str(e)}", "Error in categorization"
 
 def analyze_with_anchors(video_url, transcript):
@@ -421,6 +488,7 @@ Now select any comment from the dropdown above to see:
         return summary_text, instructions
 
     except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
         return f"JSON Error: {e}\n\nRaw output:\n{cleaned_output}", "Analysis failed"
 
 def respond(message, chat_history):
@@ -451,6 +519,7 @@ def respond(message, chat_history):
         return chat_history, ""
         
     except Exception as e:
+        logger.error(f"Chat response error: {e}")
         error_msg = f"An error occurred: {str(e)}"
         chat_history.append((message, error_msg))
         return chat_history, ""
@@ -480,235 +549,252 @@ def get_chat_summary():
         return f"Chat Session: {len(human_messages)} questions asked about '{current_video_title}'"
         
     except Exception as e:
+        logger.error(f"Chat summary error: {e}")
         return f"Error getting chat summary: {str(e)}"
 
 # Create the Gradio interface
-with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
-    gr.Markdown("""
-    # 🎬 YouTube Video Analyzer
-    Easily analyze YouTube videos for transcripts, metadata, sentiment, viewer comment quality and chat with data!
+def create_interface():
+    """Create the Gradio interface"""
+    with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
+        gr.Markdown("""
+        # 🎬 YouTube Video Analyzer
+        Easily analyze YouTube videos for transcripts, metadata, sentiment, viewer comment quality and chat with data!
 
-    ---
-    """)
+        ---
+        """)
 
-    with gr.Tabs():
-        with gr.Tab("Search Videos"):
-            gr.Markdown("## Search YouTube Videos")
+        with gr.Tabs():
+            with gr.Tab("Search Videos"):
+                gr.Markdown("## Search YouTube Videos")
 
-            with gr.Row():
-                with gr.Column(scale=3):
-                    search_input = gr.Textbox(
-                        label="Search Query",
-                        placeholder="Enter your YouTube search query...",
+                with gr.Row():
+                    with gr.Column(scale=3):
+                        search_input = gr.Textbox(
+                            label="Search Query",
+                            placeholder="Enter your YouTube search query...",
+                            lines=1
+                        )
+                    with gr.Column(scale=1):
+                        num_results = gr.Slider(
+                            label="Number of Results",
+                            minimum=1,
+                            maximum=10,
+                            value=5,
+                            step=1
+                        )
+
+                search_button = gr.Button("Search YouTube", variant="primary")
+
+                with gr.Accordion("View Search Results", open=True):
+                    results_output = gr.HTML(
+                        label="Search Results",
+                        value="Enter a search query and click 'Search YouTube' to see results."
+                    )
+
+                search_button.click(
+                    fn=format_search_results,
+                    inputs=[search_input, num_results],
+                    outputs=results_output
+                )
+
+                search_input.submit(
+                    fn=format_search_results,
+                    inputs=[search_input, num_results],
+                    outputs=results_output
+                )
+
+            with gr.Tab("Analyze Video"):
+                gr.Markdown("## Analyze a YouTube Video")
+
+                with gr.Row():
+                    video_url_input = gr.Textbox(
+                        label="YouTube Video URL",
+                        placeholder="Paste YouTube video URL here..."
+                    )
+                    analyze_button = gr.Button("Extract Metadata & Transcript", variant="primary")
+
+                with gr.Accordion("Transcript and Metadata", open=True):
+                    with gr.Row():
+                        transcript_output = gr.Textbox(label="Full Transcript", lines=8, interactive=False)
+                        metadata_output = gr.JSON(label="Video Metadata")
+
+                    short_transcript_display = gr.Textbox(label="Preview of Transcript", lines=4, interactive=False)
+
+                # Define chat_status_display before using it
+                chat_status_display = gr.Textbox(
+                    label="QA Chatbot Status",
+                    lines=1,
+                    interactive=False,
+                    value="Extract a transcript to enable the chatbot."
+                )
+
+                analyze_button.click(
+                    fn=process_youtube_url,
+                    inputs=video_url_input,
+                    outputs=[transcript_output, metadata_output, short_transcript_display, chat_status_display]
+                )
+
+            with gr.Tab("Comment Analysis"):
+                gr.Markdown("## Comment Analysis")
+
+                with gr.Row():
+                    with gr.Column():
+                        comment_url_input = gr.Textbox(
+                            label="YouTube Video URL for Comments",
+                            placeholder="Paste the same or different YouTube URL..."
+                        )
+                        max_comments = gr.Slider(
+                            label="Max Comments to Fetch",
+                            minimum=5,
+                            maximum=50,
+                            value=20,
+                            step=5
+                        )
+                        get_comments_btn = gr.Button("Get Comments & Analyze", variant="primary")
+
+                with gr.Accordion("Fetched Comments", open=False):
+                    with gr.Row():
+                        comments_display = gr.Textbox(
+                            label="All Comments (Raw)",
+                            lines=8,
+                            interactive=False
+                        )
+                        comments_summary = gr.Textbox(
+                            label="Comments Status",
+                            lines=8,
+                            interactive=False,
+                            value="Click 'Get Comments & Analyze' to fetch comments."
+                        )
+
+                gr.Markdown("### Individual Comment Analysis")
+
+                selected_comment = gr.Dropdown(
+                    label="Select a Comment for Detailed Analysis",
+                    choices=[],
+                    visible=False,
+                    interactive=True
+                )
+
+                with gr.Row():
+                    individual_sentiment = gr.Textbox(
+                        label="Sentiment Analysis",
+                        lines=6,
+                        interactive=False
+                    )
+                    individual_category = gr.Textbox(
+                        label="AI Categorization",
+                        lines=6,
+                        interactive=False
+                    )
+
+                gr.Markdown("### AI-Powered Comment Categorization")
+
+                analyze_anchors_btn = gr.Button("Generate Anchor Analysis", variant="secondary")
+
+                with gr.Accordion("AI Analysis Results", open=False):
+                    with gr.Row():
+                        anchor_summary = gr.Textbox(
+                            label="AI Summary",
+                            lines=8,
+                            interactive=False
+                        )
+                        analysis_instructions = gr.Textbox(
+                            label="Instructions",
+                            lines=8,
+                            interactive=False,
+                            value="1. Fetch comments first\n2. Generate AI anchor analysis\n3. Select comment to view categorization"
+                        )
+
+                get_comments_btn.click(
+                    fn=process_comments,
+                    inputs=[comment_url_input, max_comments],
+                    outputs=[comments_display, comments_summary, selected_comment, individual_sentiment, individual_category]
+                )
+
+                analyze_anchors_btn.click(
+                    fn=analyze_with_anchors,
+                    inputs=[comment_url_input, transcript_output],
+                    outputs=[anchor_summary, analysis_instructions]
+                )
+
+                selected_comment.change(
+                    fn=analyze_selected_comment,
+                    inputs=[selected_comment],
+                    outputs=[individual_sentiment, individual_category]
+                )
+
+            with gr.Tab("Chat with Transcript"):
+                gr.Markdown("## Ask questions about the video transcript")
+                gr.Markdown("This chat has **memory** - it remembers your previous questions and can build on the conversation!")
+
+                # Chat status and summary
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        # chat_status_display is already defined above
+                        pass
+                    with gr.Column(scale=1):
+                        chat_summary_btn = gr.Button("View Chat Summary", variant="secondary")
+                        chat_summary_output = gr.Textbox(
+                            label="Chat Summary",
+                            lines=2,
+                            interactive=False,
+                            value="No active chat session"
+                        )
+
+                # Main chat interface
+                chatbot = gr.Chatbot(
+                    label="Chat History",
+                    height=400,
+                    show_label=True,
+                    bubble_full_width=False
+                )
+                
+                with gr.Row():
+                    msg = gr.Textbox(
+                        label="Your Question",
+                        placeholder="Ask me about the video content...",
+                        scale=4,
                         lines=1
                     )
-                with gr.Column(scale=1):
-                    num_results = gr.Slider(
-                        label="Number of Results",
-                        minimum=1,
-                        maximum=10,
-                        value=5,
-                        step=1
-                    )
-
-            search_button = gr.Button("Search YouTube", variant="primary")
-
-            with gr.Accordion("View Search Results", open=True):
-                results_output = gr.HTML(
-                    label="Search Results",
-                    value="Enter a search query and click 'Search YouTube' to see results."
-                )
-
-            search_button.click(
-                fn=format_search_results,
-                inputs=[search_input, num_results],
-                outputs=results_output
-            )
-
-            search_input.submit(
-                fn=format_search_results,
-                inputs=[search_input, num_results],
-                outputs=results_output
-            )
-
-        with gr.Tab("Analyze Video"):
-            gr.Markdown("## Analyze a YouTube Video")
-
-            with gr.Row():
-                video_url_input = gr.Textbox(
-                    label="YouTube Video URL",
-                    placeholder="Paste YouTube video URL here..."
-                )
-                analyze_button = gr.Button("Extract Metadata & Transcript", variant="primary")
-
-            with gr.Accordion("Transcript and Metadata", open=True):
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+                
                 with gr.Row():
-                    transcript_output = gr.Textbox(label="Full Transcript", lines=8, interactive=False)
-                    metadata_output = gr.JSON(label="Video Metadata")
+                    clear_btn = gr.Button("Clear Chat & Memory", variant="secondary")
 
-                short_transcript_display = gr.Textbox(label="Preview of Transcript", lines=4, interactive=False)
+                # Event handlers for chat
+                msg.submit(respond, [msg, chatbot], [chatbot, msg])
+                send_btn.click(respond, [msg, chatbot], [chatbot, msg])
+                clear_btn.click(clear_chat, None, chatbot, queue=False)
+                
+                # Chat summary handler
+                chat_summary_btn.click(get_chat_summary, None, chat_summary_output)
 
-            # Define chat_status_display before using it
-            chat_status_display = gr.Textbox(
-                label="QA Chatbot Status",
-                lines=1,
-                interactive=False,
-                value="Extract a transcript to enable the chatbot."
-            )
+                gr.Markdown("""
+                ### Chat Features:
+                - **Conversational Memory**: The AI remembers your previous questions and can reference them
+                - **Context Awareness**: Questions are automatically contextualized with the video title
+                - **Source References**: Answers include information about which parts of the transcript were used
+                - **Memory Window**: Keeps track of your last 10 conversation exchanges
+                """)
 
-            analyze_button.click(
-                fn=process_youtube_url,
-                inputs=video_url_input,
-                outputs=[transcript_output, metadata_output, short_transcript_display, chat_status_display]
-            )
+    return demo
 
-        with gr.Tab("Comment Analysis"):
-            gr.Markdown("## Comment Analysis")
-
-            with gr.Row():
-                with gr.Column():
-                    comment_url_input = gr.Textbox(
-                        label="YouTube Video URL for Comments",
-                        placeholder="Paste the same or different YouTube URL..."
-                    )
-                    max_comments = gr.Slider(
-                        label="Max Comments to Fetch",
-                        minimum=5,
-                        maximum=50,
-                        value=20,
-                        step=5
-                    )
-                    get_comments_btn = gr.Button("Get Comments & Analyze", variant="primary")
-
-            with gr.Accordion("Fetched Comments", open=False):
-                with gr.Row():
-                    comments_display = gr.Textbox(
-                        label="All Comments (Raw)",
-                        lines=8,
-                        interactive=False
-                    )
-                    comments_summary = gr.Textbox(
-                        label="Comments Status",
-                        lines=8,
-                        interactive=False,
-                        value="Click 'Get Comments & Analyze' to fetch comments."
-                    )
-
-            gr.Markdown("### Individual Comment Analysis")
-
-            selected_comment = gr.Dropdown(
-                label="Select a Comment for Detailed Analysis",
-                choices=[],
-                visible=False,
-                interactive=True
-            )
-
-            with gr.Row():
-                individual_sentiment = gr.Textbox(
-                    label="Sentiment Analysis",
-                    lines=6,
-                    interactive=False
-                )
-                individual_category = gr.Textbox(
-                    label="AI Categorization",
-                    lines=6,
-                    interactive=False
-                )
-
-            gr.Markdown("### AI-Powered Comment Categorization")
-
-            analyze_anchors_btn = gr.Button("Generate Anchor Analysis", variant="secondary")
-
-            with gr.Accordion("AI Analysis Results", open=False):
-                with gr.Row():
-                    anchor_summary = gr.Textbox(
-                        label="AI Summary",
-                        lines=8,
-                        interactive=False
-                    )
-                    analysis_instructions = gr.Textbox(
-                        label="Instructions",
-                        lines=8,
-                        interactive=False,
-                        value="1. Fetch comments first\n2. Generate AI anchor analysis\n3. Select comment to view categorization"
-                    )
-
-            get_comments_btn.click(
-                fn=process_comments,
-                inputs=[comment_url_input, max_comments],
-                outputs=[comments_display, comments_summary, selected_comment, individual_sentiment, individual_category]
-            )
-
-            analyze_anchors_btn.click(
-                fn=analyze_with_anchors,
-                inputs=[comment_url_input, transcript_output],
-                outputs=[anchor_summary, analysis_instructions]
-            )
-
-            selected_comment.change(
-                fn=analyze_selected_comment,
-                inputs=[selected_comment],
-                outputs=[individual_sentiment, individual_category]
-            )
-
-        with gr.Tab("Chat with Transcript"):
-            gr.Markdown("## Ask questions about the video transcript")
-            gr.Markdown("This chat has **memory** - it remembers your previous questions and can build on the conversation!")
-
-            # Chat status and summary
-            with gr.Row():
-                with gr.Column(scale=2):
-                    # chat_status_display is already defined above
-                    pass
-                with gr.Column(scale=1):
-                    chat_summary_btn = gr.Button("View Chat Summary", variant="secondary")
-                    chat_summary_output = gr.Textbox(
-                        label="Chat Summary",
-                        lines=2,
-                        interactive=False,
-                        value="No active chat session"
-                    )
-
-            # Main chat interface
-            chatbot = gr.Chatbot(
-                label="Chat History",
-                height=400,
-                show_label=True,
-                bubble_full_width=False
-            )
-            
-            with gr.Row():
-                msg = gr.Textbox(
-                    label="Your Question",
-                    placeholder="Ask me about the video content...",
-                    scale=4,
-                    lines=1
-                )
-                send_btn = gr.Button("Send", variant="primary", scale=1)
-            
-            with gr.Row():
-                clear_btn = gr.Button("Clear Chat & Memory", variant="secondary")
-
-            # Event handlers for chat
-            msg.submit(respond, [msg, chatbot], [chatbot, msg])
-            send_btn.click(respond, [msg, chatbot], [chatbot, msg])
-            clear_btn.click(clear_chat, None, chatbot, queue=False)
-            
-            # Chat summary handler
-            chat_summary_btn.click(get_chat_summary, None, chat_summary_output)
-
-            gr.Markdown("""
-            ### Chat Features:
-            - **Conversational Memory**: The AI remembers your previous questions and can reference them
-            - **Context Awareness**: Questions are automatically contextualized with the video title
-            - **Source References**: Answers include information about which parts of the transcript were used
-            - **Memory Window**: Keeps track of your last 10 conversation exchanges
-            """)
+# Initialize the interface
+demo = create_interface()
 
 if __name__ == "__main__":
+    # Get port from environment (Cloud Run sets this)
     port = int(os.environ.get("PORT", 7860))
+    
+    logger.info(f"Starting Gradio app on port {port}")
+    
+    # Launch with Cloud Run compatible settings
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        share=False
+        server_name="0.0.0.0",  # Listen on all interfaces
+        server_port=port,       # Use Cloud Run's assigned port
+        share=False,           # Don't create public Gradio link
+        # show_error=True,       # Show errors for debugging
+        # enable_queue=True,     # Enable queue for better performance
+        # favicon_path=None,     # Disable favicon to reduce requests
+        # show_api=False         # Disable API docs to reduce memory
     )
