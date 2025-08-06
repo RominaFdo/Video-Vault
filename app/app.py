@@ -794,7 +794,7 @@ if __name__ == "__main__":
         server_port=port,       # Use Cloud Run's assigned port
         share=False,           # Don't create public Gradio link
         # show_error=True,       # Show errors for debugging
-        # enable_queue=True,     # Enable queue for better performance
+        enable_queue=True,     # Enable queue for better performance
         # favicon_path=None,     # Disable favicon to reduce requests
         # show_api=False         # Disable API docs to reduce memory
     )
