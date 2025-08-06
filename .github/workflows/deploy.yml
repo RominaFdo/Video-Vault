@@ -39,7 +39,7 @@ jobs:
           --allow-unauthenticated \
           --port 7860 \
           --memory=4Gi \
-          --allow-unauthenticated \
-          --timeout 300 \
-          --concurrency 10 \
-          --max-instances 10
+          --timeout 600 \
+          --concurrency 1 \
+          --max-instances 1
+
