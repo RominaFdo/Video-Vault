@@ -1,524 +1,83 @@
 import gradio as gr
-import yt_dlp
-from urllib.parse import urlparse, parse_qs
-import json
-import subprocess
 import os
 import logging
-import traceback
-from functools import wraps
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    logger.info("dotenv not available, using environment variables directly")
+def greet(name):
+    """Simple greeting function"""
+    if not name:
+        return "Hello! Please enter your name."
+    return f"Hello, {name}! YouTube Analyzer is working on Cloud Run! 🎉"
 
-# Get API keys from environment
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-
-if not GOOGLE_API_KEY:
-    logger.warning("GOOGLE_API_KEY not found in environment variables")
-if not YOUTUBE_API_KEY:
-    logger.warning("YOUTUBE_API_KEY not found in environment variables")
-
-def error_handler(func):
-    """Decorator to handle errors gracefully"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in {func.__name__}: {e}")
-            logger.error(traceback.format_exc())
-            return f"Error: {str(e)}"
-    return wrapper
-
-def safe_import(module_name, package_name=None):
-    """Safely import modules and log if they fail"""
-    try:
-        if package_name:
-            module = __import__(module_name, fromlist=[package_name])
-            return getattr(module, package_name)
-        else:
-            return __import__(module_name)
-    except ImportError as e:
-        logger.error(f"Failed to import {module_name}: {e}")
-        return None
-
-# Try importing optional dependencies
-youtube_transcript_api = safe_import("youtube_transcript_api")
-googleapiclient = safe_import("googleapiclient.discovery")
-
-# Global variables for basic features
-stored_comments = []
-current_video_title = ""
-
-class FeatureManager:
-    """Manage available features based on dependencies"""
+def test_features():
+    """Test basic functionality"""
+    return """
+    🎬 YouTube Video Analyzer - Cloud Run Test
     
-    def __init__(self):
-        self.features = {
-            'search': True,  # Always available with yt-dlp
-            'metadata': True,  # Always available with yt-dlp
-            'transcript': bool(youtube_transcript_api),
-            'comments': bool(googleapiclient and YOUTUBE_API_KEY),
-            'sentiment': False,  # Disabled in stage 1
-            'qa_chat': False,   # Disabled in stage 1
-            'categorization': False  # Disabled in stage 1
-        }
-        logger.info(f"Available features: {self.features}")
-
-feature_manager = FeatureManager()
-
-@error_handler
-def search_youtube(query, max_results=5):
-    """Search YouTube videos and return results"""
-    search_url = f"ytsearch{max_results}:{query}"
-    ydl_opts = {
-        'extract_flat': True,
-        'quiet': True,
-        'no_warnings': True
-    }
-    videos = []
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            results = ydl.extract_info(search_url, download=False)
-            for entry in results.get('entries', []):
-                videos.append({
-                    "title": entry.get('title', 'N/A'),
-                    "url": f"https://www.youtube.com/watch?v={entry['id']}",
-                    "duration": entry.get('duration', 'N/A'),
-                    "views": entry.get('view_count', 'N/A')
-                })
-    except Exception as e:
-        logger.error(f"YouTube search error: {e}")
-        return f"Error searching YouTube: {str(e)}"
-
-    return videos
-
-@error_handler
-def format_search_results(query, num_results):
-    """Format search results for display"""
-    if not query.strip():
-        return "Please enter a search query."
-
-    try:
-        num_results = int(num_results)
-        if num_results < 1 or num_results > 10:
-            num_results = 5
-    except:
-        num_results = 5
-
-    videos = search_youtube(query, num_results)
-
-    if isinstance(videos, str):
-        return videos
-
-    if not videos:
-        return "No videos found."
-
-    formatted_results = []
-    for i, video in enumerate(videos, 1):
-        duration = video['duration'] if video['duration'] != 'N/A' else 'Unknown'
-        views = video['views'] if video['views'] != 'N/A' else 'Unknown'
-
-        result = f"""
-        <div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0; border-radius: 5px;">
-            <h4><a href="{video['url']}" target="_blank">{video['title']}</a></h4>
-            <p><strong>URL:</strong> {video['url']}</p>
-            <p><strong>Duration:</strong> {duration} seconds | <strong>Views:</strong> {views}</p>
-        </div>
-        """
-        formatted_results.append(result)
-
-    return "".join(formatted_results)
-
-def extract_video_id(url):
-    """Extract video ID from YouTube URL"""
-    if "youtube" in url:
-        return parse_qs(urlparse(url).query).get("v", [None])[0]
-    elif "youtu.be" in url:
-        return url.split("/")[-1]
-    return None
-
-@error_handler
-def fetch_transcript(video_id):
-    """Fetch transcript using youtube-transcript-api"""
-    if not feature_manager.features['transcript']:
-        return "Transcript feature not available - youtube-transcript-api not installed"
-        
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
-        from youtube_transcript_api.formatters import TextFormatter
-        
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        formatter = TextFormatter()
-        return formatter.format_transcript(transcript)
-    except Exception as e:
-        logger.error(f"Transcript fetch error: {e}")
-        return f"Error fetching transcript: {str(e)}"
-
-@error_handler
-def get_metadata_only(video_url):
-    """Get video metadata using yt-dlp"""
-    try:
-        cmd = ['yt-dlp', '--dump-json', '--no-download', video_url]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-        if result.returncode == 0:
-            metadata = json.loads(result.stdout)
-            return {
-                'title': metadata.get('title'),
-                'description': metadata.get('description', '')[:500] + "..." if len(metadata.get('description', '')) > 500 else metadata.get('description'),
-                'channel': metadata.get('uploader'),
-                'duration': metadata.get('duration'),
-                'views': metadata.get('view_count')
-            }
-        else:
-            return {"error": f"yt-dlp failed: {result.stderr.strip()}"}
-    except subprocess.TimeoutExpired:
-        return {"error": "yt-dlp timed out"}
-    except Exception as e:
-        logger.error(f"Metadata extraction error: {e}")
-        return {"error": f"yt-dlp error: {str(e)}"}
-
-@error_handler
-def process_youtube_url(url):
-    """Process YouTube URL - basic version"""
-    global current_video_title
+    ✅ Gradio interface: Working
+    ✅ Cloud Run deployment: Working
+    ✅ Port 7860: Working
+    ✅ Container startup: Working
     
-    if not url:
-        return "Please enter a YouTube URL", {}, "", "Please enter a YouTube URL"
-    
-    video_id = extract_video_id(url)
-    if not video_id:
-        return "Invalid YouTube URL", {}, "", "Invalid YouTube URL"
-
-    # Get metadata first (always available)
-    metadata = get_metadata_only(url)
-    current_video_title = metadata.get('title', 'Unknown Video') if isinstance(metadata, dict) else 'Unknown Video'
-    
-    # Get transcript if available
-    transcript = "Transcript not available"
-    if feature_manager.features['transcript']:
-        transcript = fetch_transcript(video_id)
-    
-    # QA chat disabled in stage 1
-    qa_status = "QA Chat feature will be added in stage 2 deployment"
-    
-    # Return short transcript for preview
-    short_transcript = transcript[:500] + "..." if isinstance(transcript, str) and len(transcript) > 500 else transcript
-    
-    return transcript, metadata, short_transcript, qa_status
-
-@error_handler
-def get_comments(video_id, api_key, max_results=20):
-    """Get comments from YouTube video"""
-    if not feature_manager.features['comments']:
-        return ["Comments feature not available - YouTube API not configured"]
-        
-    try:
-        from googleapiclient.discovery import build
-        
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        request = youtube.commentThreads().list(
-            part='snippet',
-            videoId=video_id,
-            maxResults=max_results,
-            textFormat='plainText'
-        )
-        response = request.execute()
-
-        comments = []
-        for item in response.get('items', []):
-            comment = item['snippet']['topLevelComment']['snippet']['textDisplay']
-            comments.append(comment)
-
-        return comments
-    except Exception as e:
-        logger.error(f"Comment fetch error: {e}")
-        return [f"Error fetching comments: {str(e)}"]
-
-@error_handler
-def process_comments(video_url, max_comments):
-    """Process comments for a YouTube video - basic version"""
-    global stored_comments
-    
-    if not video_url:
-        return "Please enter a YouTube URL", "No comments", gr.Dropdown(choices=[], visible=False), "", ""
-    
-    video_id = extract_video_id(video_url)
-    if not video_id:
-        return "Invalid YouTube URL", "No comments", gr.Dropdown(choices=[], visible=False), "", ""
-
-    comments = get_comments(video_id, YOUTUBE_API_KEY, max_comments)
-
-    if not comments or (len(comments) == 1 and "Error" in comments[0]):
-        return str(comments), "No comments available", gr.Dropdown(choices=[], visible=False), "", ""
-
-    stored_comments = comments
-
-    comment_choices = [f"{i+1}. {comment[:80]}..." if len(comment) > 80 else f"{i+1}. {comment}"
-                      for i, comment in enumerate(comments)]
-
-    comments_summary = f"Fetched {len(comments)} comments. Sentiment analysis will be added in stage 2."
-
-    return (
-        "\n".join([f"{i+1}. {comment}" for i, comment in enumerate(comments)]),
-        comments_summary,
-        gr.Dropdown(choices=comment_choices, label="Select Comment", visible=True, value=None),
-        "",
-        ""
-    )
-
-@error_handler
-def analyze_selected_comment(selected_comment_text):
-    """Basic comment display - no analysis in stage 1"""
-    if not selected_comment_text or not stored_comments:
-        return "No comment selected", "Analysis coming in stage 2"
-
-    try:
-        comment_index = int(selected_comment_text.split('.')[0]) - 1
-        if comment_index < 0 or comment_index >= len(stored_comments):
-            return "Invalid selection", "Invalid selection"
-
-        selected_comment = stored_comments[comment_index]
-        
-        comment_display = f"Selected Comment:\n\n{selected_comment}"
-        analysis_info = "Sentiment analysis and AI categorization will be available in stage 2 deployment with ML models."
-
-        return comment_display, analysis_info
-
-    except Exception as e:
-        logger.error(f"Comment selection error: {e}")
-        return f"Error: {str(e)}", "Selection failed"
-
-def get_feature_status():
-    """Get status of available features"""
-    status = "🎬 YouTube Video Analyzer - Stage 1 Deployment\n\n"
-    
-    features = {
-        'Video Search': feature_manager.features['search'],
-        'Metadata Extraction': feature_manager.features['metadata'],
-        'Transcript Extraction': feature_manager.features['transcript'],
-        'Comment Fetching': feature_manager.features['comments'],
-        'Sentiment Analysis': feature_manager.features['sentiment'],
-        'QA Chat': feature_manager.features['qa_chat'],
-        'Comment Categorization': feature_manager.features['categorization']
-    }
-    
-    for feature, available in features.items():
-        if available:
-            status += f"✅ {feature}\n"
-        elif feature in ['Sentiment Analysis', 'QA Chat', 'Comment Categorization']:
-            status += f"🔄 {feature} (Coming in Stage 2)\n"
-        else:
-            status += f"❌ {feature}\n"
-    
-    if not feature_manager.features['comments']:
-        status += "\n⚠️ Set YOUTUBE_API_KEY for comment features"
-        
-    return status
+    Ready to add more features!
+    """
 
 def create_interface():
-    """Create Gradio interface - Stage 1"""
+    """Create minimal Gradio interface"""
     
-    with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
+    with gr.Blocks(title="YouTube Analyzer - Cloud Run Test") as demo:
+        gr.Markdown("# 🎬 YouTube Video Analyzer")
+        gr.Markdown("## Cloud Run Deployment Test")
         
-        gr.Markdown("# 🎬 YouTube Video Analyzer - Stage 1")
-        gr.Markdown("Basic features available. ML-powered features coming in Stage 2!")
+        with gr.Tab("Test Basic Function"):
+            name_input = gr.Textbox(label="Enter your name", placeholder="Type your name here...")
+            greet_button = gr.Button("Say Hello", variant="primary")
+            greet_output = gr.Textbox(label="Response", interactive=False)
+            
+            greet_button.click(fn=greet, inputs=name_input, outputs=greet_output)
+            name_input.submit(fn=greet, inputs=name_input, outputs=greet_output)
         
-        # Feature status
-        with gr.Accordion("Feature Status", open=True):
-            status_display = gr.Textbox(
-                value=get_feature_status(),
-                lines=12,
-                interactive=False,
-                label="Available Features"
-            )
+        with gr.Tab("System Status"):
+            status_button = gr.Button("Check System Status", variant="secondary")
+            status_output = gr.Textbox(label="System Status", lines=10, interactive=False)
+            
+            status_button.click(fn=test_features, outputs=status_output)
         
-        with gr.Tabs():
-            # Search Tab
-            with gr.Tab("🔍 Search Videos"):
-                gr.Markdown("## Search YouTube Videos")
-                
-                with gr.Row():
-                    search_input = gr.Textbox(
-                        label="Search Query",
-                        placeholder="Enter search terms...",
-                        scale=3
-                    )
-                    num_results = gr.Slider(
-                        label="Results",
-                        minimum=1,
-                        maximum=10,
-                        value=5,
-                        step=1,
-                        scale=1
-                    )
-                
-                search_button = gr.Button("Search YouTube", variant="primary")
-                results_output = gr.HTML(label="Results")
-                
-                search_button.click(
-                    fn=format_search_results,
-                    inputs=[search_input, num_results],
-                    outputs=results_output
-                )
-            
-            # Analyze Tab
-            with gr.Tab("📹 Analyze Video"):
-                gr.Markdown("## Extract Video Data")
-                
-                video_url_input = gr.Textbox(
-                    label="YouTube URL",
-                    placeholder="https://www.youtube.com/watch?v=..."
-                )
-                analyze_button = gr.Button("Analyze Video", variant="primary")
-                
-                with gr.Row():
-                    with gr.Column():
-                        transcript_output = gr.Textbox(
-                            label="Transcript",
-                            lines=8,
-                            interactive=False
-                        )
-                        chat_status = gr.Textbox(
-                            label="QA Status",
-                            lines=2,
-                            interactive=False
-                        )
-                    with gr.Column():
-                        metadata_output = gr.JSON(label="Metadata")
-                        preview_output = gr.Textbox(
-                            label="Transcript Preview",
-                            lines=4,
-                            interactive=False
-                        )
-                
-                analyze_button.click(
-                    fn=process_youtube_url,
-                    inputs=video_url_input,
-                    outputs=[transcript_output, metadata_output, preview_output, chat_status]
-                )
-            
-            # Comments Tab
-            with gr.Tab("💬 Comment Analysis"):
-                gr.Markdown("## Basic Comment Fetching")
-                gr.Markdown("*Sentiment analysis coming in Stage 2*")
-                
-                with gr.Row():
-                    comment_url = gr.Textbox(
-                        label="YouTube URL",
-                        placeholder="https://www.youtube.com/watch?v=...",
-                        scale=3
-                    )
-                    max_comments = gr.Slider(
-                        label="Max Comments",
-                        minimum=5,
-                        maximum=50,
-                        value=20,
-                        step=5,
-                        scale=1
-                    )
-                
-                get_comments_btn = gr.Button("Get Comments", variant="primary")
-                
-                with gr.Row():
-                    comments_display = gr.Textbox(
-                        label="Comments",
-                        lines=6,
-                        interactive=False
-                    )
-                    comments_status = gr.Textbox(
-                        label="Status",
-                        lines=6,
-                        interactive=False
-                    )
-                
-                selected_comment = gr.Dropdown(
-                    label="Select Comment to View",
-                    choices=[],
-                    visible=False
-                )
-                
-                with gr.Row():
-                    sentiment_output = gr.Textbox(
-                        label="Selected Comment",
-                        lines=4,
-                        interactive=False
-                    )
-                    category_output = gr.Textbox(
-                        label="Analysis Info",
-                        lines=4,
-                        interactive=False
-                    )
-                
-                get_comments_btn.click(
-                    fn=process_comments,
-                    inputs=[comment_url, max_comments],
-                    outputs=[comments_display, comments_status, selected_comment, sentiment_output, category_output]
-                )
-                
-                selected_comment.change(
-                    fn=analyze_selected_comment,
-                    inputs=[selected_comment],
-                    outputs=[sentiment_output, category_output]
-                )
-            
-            # Coming Soon Tab
-            with gr.Tab("🔮 Coming in Stage 2"):
-                gr.Markdown("## Features Coming in Stage 2")
-                gr.Markdown("""
-                ### 🤖 AI-Powered Features:
-                - **Sentiment Analysis** - Analyze comment emotions
-                - **QA Chat Bot** - Ask questions about video transcripts
-                - **Smart Categorization** - AI-powered comment classification
-                - **Advanced Analytics** - Deep insights into video content
-                
-                ### Why Stage 2?
-                These features require heavy ML models that would cause timeout in Cloud Run.
-                Once Stage 1 is stable, we'll add these powerful AI features!
-                
-                ### Current Status:
-                ✅ Basic video search and metadata extraction  
-                ✅ Transcript fetching  
-                ✅ Comment retrieval  
-                🔄 Preparing ML models for next deployment  
-                """)
+        gr.Markdown("""
+        ### Next Steps:
+        1. ✅ Test this basic version works
+        2. 🔄 Add yt-dlp for video search
+        3. 🔄 Add transcript features
+        4. 🔄 Add comment analysis
+        5. 🔄 Add ML features
+        """)
     
     return demo
 
 def main():
-    """Main function - Stage 1"""
+    """Main function"""
     try:
         port = int(os.environ.get("PORT", 7860))
-        
-        logger.info(f"Starting YouTube Analyzer Stage 1 on port {port}")
-        logger.info(f"Available features: {feature_manager.features}")
+        logger.info(f"Starting minimal YouTube Analyzer on port {port}")
         
         demo = create_interface()
         
+        # Launch with minimal settings
         demo.launch(
             server_name="0.0.0.0",
             server_port=port,
             share=False,
-            enable_queue=False,  # Disable for faster startup
+            enable_queue=False,
             show_error=True,
-            quiet=False
+            quiet=False,
+            show_api=False
         )
         
     except Exception as e:
-        logger.error(f"Failed to start app: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Failed to start: {e}")
         raise
 
 if __name__ == "__main__":

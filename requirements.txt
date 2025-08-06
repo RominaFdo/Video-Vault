@@ -1,7 +1,3 @@
-# Stage 1: Basic functionality only
+# Ultra minimal - just Gradio and basic dependencies
 gradio==4.24.0
-yt-dlp
-youtube-transcript-api
-google-api-python-client
-python-dotenv
-pydantic==2.6.4
+requests
