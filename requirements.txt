@@ -11,6 +11,7 @@
 # langchain-google-genai
 # faiss-cpu
 # python-dotenv
-gradio==4.24.0
+gradio==3.50.2
 pydantic<2.0
+
 
