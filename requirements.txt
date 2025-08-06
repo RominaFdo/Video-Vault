@@ -1,16 +1,15 @@
-# gradio==4.44.0
-# yt-dlp
-# youtube-transcript-api
-# google-api-python-client
-# sentence-transformers
-# numpy
-# transformers
-# google-generativeai
-# langchain
-# langchain-community
-# langchain-google-genai
-# faiss-cpu
-# python-dotenv
+yt-dlp
+youtube-transcript-api
+google-api-python-client
+sentence-transformers
+numpy
+transformers
+google-generativeai
+langchain
+langchain-community
+langchain-google-genai
+faiss-cpu
+python-dotenv
 gradio==3.50.2
 pydantic<2.0
 
