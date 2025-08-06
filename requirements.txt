@@ -12,3 +12,5 @@
 # faiss-cpu
 # python-dotenv
 gradio==4.24.0
+pydantic<2.0
+
