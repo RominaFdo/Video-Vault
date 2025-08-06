@@ -38,8 +38,8 @@ jobs:
           --region ${{ secrets.GCP_REGION }} \
           --allow-unauthenticated \
           --port 7860 \
-          --memory 2Gi \
-          --cpu 2 \
+          --memory=4Gi \
+          --allow-unauthenticated \
           --timeout 300 \
           --concurrency 10 \
           --max-instances 10
