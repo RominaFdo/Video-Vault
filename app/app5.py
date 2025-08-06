@@ -12,6 +12,30 @@ from functools import wraps
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def safe_import(module_name, package_name=None):
+    """Safely import modules and log if they fail"""
+    try:
+        if package_name:
+            module = __import__(module_name, fromlist=[package_name])
+            return getattr(module, package_name)
+        else:
+            return __import__(module_name)
+    except ImportError as e:
+        logger.error(f"Failed to import {module_name}: {e}")
+        return None
+
+def error_handler(func):
+    """Decorator to handle errors gracefully"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {func.__name__}: {e}")
+            logger.error(traceback.format_exc())
+            return f"Error: {str(e)}"
+    return wrapper
+
 # Load environment variables
 try:
     from dotenv import load_dotenv
@@ -28,58 +52,134 @@ if not GOOGLE_API_KEY:
 if not YOUTUBE_API_KEY:
     logger.warning("YOUTUBE_API_KEY not found in environment variables")
 
-def error_handler(func):
-    """Decorator to handle errors gracefully"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error in {func.__name__}: {e}")
-            logger.error(traceback.format_exc())
-            return f"Error: {str(e)}"
-    return wrapper
-
-def safe_import(module_name, package_name=None):
-    """Safely import modules and log if they fail"""
-    try:
-        if package_name:
-            module = __import__(module_name, fromlist=[package_name])
-            return getattr(module, package_name)
-        else:
-            return __import__(module_name)
-    except ImportError as e:
-        logger.error(f"Failed to import {module_name}: {e}")
-        return None
-
-# Try importing optional dependencies
+# Initialize optional imports
 youtube_transcript_api = safe_import("youtube_transcript_api")
 googleapiclient = safe_import("googleapiclient.discovery")
+transformers = safe_import("transformers")
+google_genai = safe_import("google.generativeai")
+sentence_transformers = safe_import("sentence_transformers")
+langchain_modules = {}
 
-# Global variables for basic features
-stored_comments = []
+# Try importing langchain modules
+langchain_imports = [
+    ("langchain.text_splitter", "RecursiveCharacterTextSplitter"),
+    ("langchain.chains", "ConversationalRetrievalChain"),
+    ("langchain_google_genai", "ChatGoogleGenerativeAI"),
+    ("langchain.vectorstores", "FAISS"),
+    ("langchain.embeddings", "SentenceTransformerEmbeddings"),
+    ("langchain.memory", "ConversationBufferWindowMemory")
+]
+
+for module_name, class_name in langchain_imports:
+    result = safe_import(module_name, class_name)
+    if result:
+        langchain_modules[class_name] = result
+
+# Configure APIs if available
+if GOOGLE_API_KEY and google_genai:
+    try:
+        google_genai.configure(api_key=GOOGLE_API_KEY)
+        logger.info("Google AI configured successfully")
+    except Exception as e:
+        logger.error(f"Failed to configure Google AI: {e}")
+
+# Global variables
+global_qa_chain = None
+global_memory = None
 current_video_title = ""
+sentiment_pipe = None
+model = None
+llm = None
+embedding_model = None
+stored_comments = []
+stored_sentiment_results = []
+stored_anchor_dict = {}
+stored_matched_results = []
 
-class FeatureManager:
-    """Manage available features based on dependencies"""
+class ModelManager:
+    """Manage model initialization with fallbacks"""
     
     def __init__(self):
-        self.features = {
-            'search': True,  # Always available with yt-dlp
-            'metadata': True,  # Always available with yt-dlp
+        self.models_initialized = False
+        self.available_features = {
+            'search': True,  # Basic search always available
             'transcript': bool(youtube_transcript_api),
+            'metadata': True,  # yt-dlp based
             'comments': bool(googleapiclient and YOUTUBE_API_KEY),
-            'sentiment': False,  # Disabled in stage 1
-            'qa_chat': False,   # Disabled in stage 1
-            'categorization': False  # Disabled in stage 1
+            'sentiment': bool(transformers),
+            'qa_chat': bool(langchain_modules and GOOGLE_API_KEY),
+            'categorization': bool(sentence_transformers and google_genai)
         }
-        logger.info(f"Available features: {self.features}")
+        
+    def initialize_models(self):
+        """Initialize models with error handling"""
+        global sentiment_pipe, model, llm, embedding_model
+        
+        logger.info("Initializing models...")
+        logger.info(f"Available features: {self.available_features}")
+        
+        try:
+            # Initialize LLM if possible
+            if self.available_features['qa_chat']:
+                try:
+                    llm = langchain_modules['ChatGoogleGenerativeAI'](
+                        model="gemini-1.5-flash",  # Use more reliable model
+                        temperature=0.3,
+                        google_api_key=GOOGLE_API_KEY
+                    )
+                    logger.info("LLM initialized successfully")
+                except Exception as e:
+                    logger.error(f"LLM initialization failed: {e}")
+                    self.available_features['qa_chat'] = False
+            
+            # Initialize embedding model if possible
+            if self.available_features['qa_chat']:
+                try:
+                    embedding_model = langchain_modules['SentenceTransformerEmbeddings'](
+                        model_name="all-MiniLM-L6-v2"
+                    )
+                    logger.info("Embedding model initialized")
+                except Exception as e:
+                    logger.error(f"Embedding model initialization failed: {e}")
+                    self.available_features['qa_chat'] = False
+            
+            # Initialize sentiment pipeline if possible
+            if self.available_features['sentiment']:
+                try:
+                    sentiment_pipe = transformers.pipeline(
+                        "sentiment-analysis",
+                        model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                        device=-1  # Use CPU
+                    )
+                    logger.info("Sentiment pipeline initialized")
+                except Exception as e:
+                    logger.error(f"Sentiment pipeline initialization failed: {e}")
+                    self.available_features['sentiment'] = False
+            
+            # Initialize sentence transformer if possible
+            if self.available_features['categorization']:
+                try:
+                    model = sentence_transformers.SentenceTransformer('all-MiniLM-L6-v2')
+                    logger.info("Sentence transformer initialized")
+                except Exception as e:
+                    logger.error(f"Sentence transformer initialization failed: {e}")
+                    self.available_features['categorization'] = False
+                    
+            self.models_initialized = True
+            logger.info("Model initialization completed")
+            
+        except Exception as e:
+            logger.error(f"Model initialization error: {e}")
 
-feature_manager = FeatureManager()
+# Initialize model manager
+model_manager = ModelManager()
 
 @error_handler
 def search_youtube(query, max_results=5):
     """Search YouTube videos and return results"""
+    if not model_manager.available_features['search']:
+        return "Search feature not available"
+        
     search_url = f"ytsearch{max_results}:{query}"
     ydl_opts = {
         'extract_flat': True,
@@ -152,7 +252,7 @@ def extract_video_id(url):
 @error_handler
 def fetch_transcript(video_id):
     """Fetch transcript using youtube-transcript-api"""
-    if not feature_manager.features['transcript']:
+    if not model_manager.available_features['transcript']:
         return "Transcript feature not available - youtube-transcript-api not installed"
         
     try:
@@ -192,8 +292,8 @@ def get_metadata_only(video_url):
 
 @error_handler
 def process_youtube_url(url):
-    """Process YouTube URL - basic version"""
-    global current_video_title
+    """Process YouTube URL and set up QA chain"""
+    global global_qa_chain, global_memory, current_video_title
     
     if not url:
         return "Please enter a YouTube URL", {}, "", "Please enter a YouTube URL"
@@ -208,11 +308,46 @@ def process_youtube_url(url):
     
     # Get transcript if available
     transcript = "Transcript not available"
-    if feature_manager.features['transcript']:
+    if model_manager.available_features['transcript']:
         transcript = fetch_transcript(video_id)
     
-    # QA chat disabled in stage 1
-    qa_status = "QA Chat feature will be added in stage 2 deployment"
+    # Set up QA chain if possible
+    qa_status = "QA chat not available"
+    if model_manager.available_features['qa_chat'] and isinstance(transcript, str) and "Error" not in transcript:
+        try:
+            # Split transcript into chunks
+            splitter = langchain_modules['RecursiveCharacterTextSplitter'](
+                chunk_size=512, 
+                chunk_overlap=64
+            )
+            chunks = splitter.split_text(transcript)
+
+            # Create vector store
+            vector_store = langchain_modules['FAISS'].from_texts(chunks, embedding_model)
+
+            # Initialize conversation memory
+            global_memory = langchain_modules['ConversationBufferWindowMemory'](
+                k=10,
+                memory_key="chat_history",
+                output_key="answer",
+                return_messages=True
+            )
+
+            # Create conversational retrieval chain
+            global_qa_chain = langchain_modules['ConversationalRetrievalChain'].from_llm(
+                llm=llm,
+                retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
+                memory=global_memory,
+                return_source_documents=True
+            )
+            
+            qa_status = f"QA chatbot ready for '{current_video_title}'"
+            
+        except Exception as e:
+            logger.error(f"QA chain setup error: {e}")
+            global_qa_chain = None
+            global_memory = None
+            qa_status = f"QA setup failed: {str(e)}"
     
     # Return short transcript for preview
     short_transcript = transcript[:500] + "..." if isinstance(transcript, str) and len(transcript) > 500 else transcript
@@ -222,7 +357,7 @@ def process_youtube_url(url):
 @error_handler
 def get_comments(video_id, api_key, max_results=20):
     """Get comments from YouTube video"""
-    if not feature_manager.features['comments']:
+    if not model_manager.available_features['comments']:
         return ["Comments feature not available - YouTube API not configured"]
         
     try:
@@ -248,9 +383,22 @@ def get_comments(video_id, api_key, max_results=20):
         return [f"Error fetching comments: {str(e)}"]
 
 @error_handler
+def analyze_comments_sentiment(comments):
+    """Analyze sentiment of comments"""
+    if not model_manager.available_features['sentiment']:
+        return [(comment, {"label": "UNAVAILABLE", "score": 0}) for comment in comments]
+
+    try:
+        results = sentiment_pipe(comments, truncation=True)
+        return list(zip(comments, results))
+    except Exception as e:
+        logger.error(f"Sentiment analysis error: {e}")
+        return [(comment, {"label": "ERROR", "score": 0}) for comment in comments]
+
+@error_handler
 def process_comments(video_url, max_comments):
-    """Process comments for a YouTube video - basic version"""
-    global stored_comments
+    """Process comments for a YouTube video"""
+    global stored_comments, stored_sentiment_results
     
     if not video_url:
         return "Please enter a YouTube URL", "No comments", gr.Dropdown(choices=[], visible=False), "", ""
@@ -265,11 +413,12 @@ def process_comments(video_url, max_comments):
         return str(comments), "No comments available", gr.Dropdown(choices=[], visible=False), "", ""
 
     stored_comments = comments
+    stored_sentiment_results = analyze_comments_sentiment(comments)
 
     comment_choices = [f"{i+1}. {comment[:80]}..." if len(comment) > 80 else f"{i+1}. {comment}"
                       for i, comment in enumerate(comments)]
 
-    comments_summary = f"Fetched {len(comments)} comments. Sentiment analysis will be added in stage 2."
+    comments_summary = f"Fetched {len(comments)} comments. Select one below for analysis."
 
     return (
         "\n".join([f"{i+1}. {comment}" for i, comment in enumerate(comments)]),
@@ -281,9 +430,9 @@ def process_comments(video_url, max_comments):
 
 @error_handler
 def analyze_selected_comment(selected_comment_text):
-    """Basic comment display - no analysis in stage 1"""
+    """Analyze selected comment"""
     if not selected_comment_text or not stored_comments:
-        return "No comment selected", "Analysis coming in stage 2"
+        return "No comment selected", "No analysis available"
 
     try:
         comment_index = int(selected_comment_text.split('.')[0]) - 1
@@ -292,62 +441,108 @@ def analyze_selected_comment(selected_comment_text):
 
         selected_comment = stored_comments[comment_index]
         
-        comment_display = f"Selected Comment:\n\n{selected_comment}"
-        analysis_info = "Sentiment analysis and AI categorization will be available in stage 2 deployment with ML models."
+        # Sentiment analysis
+        sentiment_text = f"Comment: {selected_comment}\n\n"
+        if comment_index < len(stored_sentiment_results):
+            _, sentiment = stored_sentiment_results[comment_index]
+            label = sentiment.get('label', 'UNKNOWN')
+            score = sentiment.get('score', 0)
+            sentiment_text += f"Sentiment: {label} (Confidence: {score:.3f})"
+        else:
+            sentiment_text += "Sentiment: Not analyzed"
 
-        return comment_display, analysis_info
+        return sentiment_text, "Advanced categorization coming soon..."
 
     except Exception as e:
-        logger.error(f"Comment selection error: {e}")
-        return f"Error: {str(e)}", "Selection failed"
+        logger.error(f"Comment analysis error: {e}")
+        return f"Error: {str(e)}", "Analysis failed"
+
+@error_handler
+def respond(message, chat_history):
+    """Handle chat responses"""
+    if not model_manager.available_features['qa_chat']:
+        error_msg = "QA chat feature not available - missing dependencies or API keys"
+        chat_history.append((message, error_msg))
+        return chat_history, ""
+        
+    if global_qa_chain is None:
+        error_msg = "Please extract a video transcript first in the 'Analyze Video' tab"
+        chat_history.append((message, error_msg))
+        return chat_history, ""
+
+    if not message.strip():
+        return chat_history, ""
+
+    try:
+        result = global_qa_chain({"question": message})
+        answer = result.get("answer", "I couldn't find a relevant answer.")
+        
+        if "source_documents" in result and result["source_documents"]:
+            answer += f"\n\n*Based on {len(result['source_documents'])} sections from transcript*"
+        
+        chat_history.append((message, answer))
+        return chat_history, ""
+        
+    except Exception as e:
+        logger.error(f"Chat response error: {e}")
+        error_msg = f"Error: {str(e)}"
+        chat_history.append((message, error_msg))
+        return chat_history, ""
+
+def clear_chat():
+    """Clear chat history"""
+    global global_memory
+    if global_memory:
+        global_memory.clear()
+    return None
 
 def get_feature_status():
     """Get status of available features"""
-    status = "🎬 YouTube Video Analyzer - Stage 1 Deployment\n\n"
+    status = "🎬 YouTube Video Analyzer - Feature Status:\n\n"
     
     features = {
-        'Video Search': feature_manager.features['search'],
-        'Metadata Extraction': feature_manager.features['metadata'],
-        'Transcript Extraction': feature_manager.features['transcript'],
-        'Comment Fetching': feature_manager.features['comments'],
-        'Sentiment Analysis': feature_manager.features['sentiment'],
-        'QA Chat': feature_manager.features['qa_chat'],
-        'Comment Categorization': feature_manager.features['categorization']
+        'Video Search': model_manager.available_features['search'],
+        'Metadata Extraction': model_manager.available_features['metadata'],
+        'Transcript Extraction': model_manager.available_features['transcript'],
+        'Comment Fetching': model_manager.available_features['comments'],
+        'Sentiment Analysis': model_manager.available_features['sentiment'],
+        'QA Chat': model_manager.available_features['qa_chat'],
+        'Comment Categorization': model_manager.available_features['categorization']
     }
     
     for feature, available in features.items():
-        if available:
-            status += f"✅ {feature}\n"
-        elif feature in ['Sentiment Analysis', 'QA Chat', 'Comment Categorization']:
-            status += f"🔄 {feature} (Coming in Stage 2)\n"
-        else:
-            status += f"❌ {feature}\n"
+        status += f"{'✅' if available else '❌'} {feature}\n"
     
-    if not feature_manager.features['comments']:
+    if not model_manager.available_features['comments']:
         status += "\n⚠️ Set YOUTUBE_API_KEY for comment features"
+    if not model_manager.available_features['qa_chat']:
+        status += "\n⚠️ Set GOOGLE_API_KEY for QA chat features"
         
     return status
 
 def create_interface():
-    """Create Gradio interface - Stage 1"""
+    """Create Gradio interface"""
+    
+    # Initialize models when creating interface
+    if not model_manager.models_initialized:
+        model_manager.initialize_models()
     
     with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
         
-        gr.Markdown("# 🎬 YouTube Video Analyzer - Stage 1")
-        gr.Markdown("Basic features available. ML-powered features coming in Stage 2!")
+        gr.Markdown("# YouTube Video Analyzer")
         
         # Feature status
-        with gr.Accordion("Feature Status", open=True):
+        with gr.Accordion("Feature Status", open=False):
             status_display = gr.Textbox(
                 value=get_feature_status(),
-                lines=12,
+                lines=10,
                 interactive=False,
                 label="Available Features"
             )
         
         with gr.Tabs():
             # Search Tab
-            with gr.Tab("🔍 Search Videos"):
+            with gr.Tab("Search Videos"):
                 gr.Markdown("## Search YouTube Videos")
                 
                 with gr.Row():
@@ -375,7 +570,7 @@ def create_interface():
                 )
             
             # Analyze Tab
-            with gr.Tab("📹 Analyze Video"):
+            with gr.Tab("Analyze Video"):
                 gr.Markdown("## Extract Video Data")
                 
                 video_url_input = gr.Textbox(
@@ -411,9 +606,8 @@ def create_interface():
                 )
             
             # Comments Tab
-            with gr.Tab("💬 Comment Analysis"):
-                gr.Markdown("## Basic Comment Fetching")
-                gr.Markdown("*Sentiment analysis coming in Stage 2*")
+            with gr.Tab("Comment Analysis"):
+                gr.Markdown("## Analyze Video Comments")
                 
                 with gr.Row():
                     comment_url = gr.Textbox(
@@ -445,19 +639,19 @@ def create_interface():
                     )
                 
                 selected_comment = gr.Dropdown(
-                    label="Select Comment to View",
+                    label="Select Comment for Analysis",
                     choices=[],
                     visible=False
                 )
                 
                 with gr.Row():
                     sentiment_output = gr.Textbox(
-                        label="Selected Comment",
+                        label="Sentiment Analysis",
                         lines=4,
                         interactive=False
                     )
                     category_output = gr.Textbox(
-                        label="Analysis Info",
+                        label="Categorization",
                         lines=4,
                         interactive=False
                     )
@@ -474,46 +668,46 @@ def create_interface():
                     outputs=[sentiment_output, category_output]
                 )
             
-            # Coming Soon Tab
-            with gr.Tab("🔮 Coming in Stage 2"):
-                gr.Markdown("## Features Coming in Stage 2")
-                gr.Markdown("""
-                ### 🤖 AI-Powered Features:
-                - **Sentiment Analysis** - Analyze comment emotions
-                - **QA Chat Bot** - Ask questions about video transcripts
-                - **Smart Categorization** - AI-powered comment classification
-                - **Advanced Analytics** - Deep insights into video content
+            # Chat Tab
+            with gr.Tab("Chat with Video"):
+                gr.Markdown("## Ask Questions About the Video")
                 
-                ### Why Stage 2?
-                These features require heavy ML models that would cause timeout in Cloud Run.
-                Once Stage 1 is stable, we'll add these powerful AI features!
+                chatbot = gr.Chatbot(height=400, label="Conversation")
                 
-                ### Current Status:
-                ✅ Basic video search and metadata extraction  
-                ✅ Transcript fetching  
-                ✅ Comment retrieval  
-                🔄 Preparing ML models for next deployment  
-                """)
+                with gr.Row():
+                    msg = gr.Textbox(
+                        label="Question",
+                        placeholder="Ask about the video content...",
+                        scale=4
+                    )
+                    send_btn = gr.Button("Send", variant="primary", scale=1)
+                
+                clear_btn = gr.Button("Clear Chat", variant="secondary")
+                
+                msg.submit(respond, [msg, chatbot], [chatbot, msg])
+                send_btn.click(respond, [msg, chatbot], [chatbot, msg])
+                clear_btn.click(clear_chat, None, chatbot)
     
     return demo
 
 def main():
-    """Main function - Stage 1"""
+    """Main function to run the app"""
     try:
+        # Get port from environment
         port = int(os.environ.get("PORT", 7860))
         
-        logger.info(f"Starting YouTube Analyzer Stage 1 on port {port}")
-        logger.info(f"Available features: {feature_manager.features}")
+        logger.info(f"Starting app on port {port}")
+        logger.info(f"Available features: {model_manager.available_features}")
         
+        # Create and launch interface
         demo = create_interface()
         
         demo.launch(
             server_name="0.0.0.0",
             server_port=port,
             share=False,
-            enable_queue=False,  # Disable for faster startup
-            show_error=True,
-            quiet=False
+            enable_queue=True,
+            show_error=True
         )
         
     except Exception as e:

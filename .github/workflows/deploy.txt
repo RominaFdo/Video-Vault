@@ -1,4 +1,4 @@
-name: Deploy to Google Cloud Run - Stage 1
+name: Deploy to Google Cloud Run
 
 on:
   push:
@@ -27,23 +27,19 @@ jobs:
 
     - name: Build and Push Docker image
       run: |
-        docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1 .
-        docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1
+        docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:latest .
+        docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:latest
 
-    - name: Deploy to Cloud Run - Stage 1
+    - name: Deploy to Cloud Run
       run: |
         gcloud run deploy video-vault \
-          --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1 \
+          --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:latest \
           --platform managed \
           --region ${{ secrets.GCP_REGION }} \
           --allow-unauthenticated \
           --port 7860 \
-          --memory 2Gi \
-          --cpu 1 \
-          --timeout 300 \
-          --concurrency 10 \
-          --max-instances 5 \
-          --min-instances 0 \
-          --execution-environment gen2 \
-          --cpu-throttling \
-          --set-env-vars STAGE=1
+          --memory=4Gi \
+          --timeout 600 \
+          --concurrency 1 \
+          --max-instances 1
+

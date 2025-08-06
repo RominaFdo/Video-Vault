@@ -1,14 +1,7 @@
+# Stage 1: Basic functionality only
+gradio==4.24.0
 yt-dlp
 youtube-transcript-api
 google-api-python-client
-sentence-transformers
-numpy
-transformers
-google-generativeai
-langchain==0.2.0
-langchain-community
-langchain-google-genai
-faiss-cpu
 python-dotenv
-gradio==4.24.0
 pydantic==2.6.4
