@@ -1,27 +1,42 @@
-# Use Python slim for fastest startup
-FROM python:3.10-slim
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PORT=7860
+# Use Python 3.11 slim image for better compatibility
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy app
-COPY app ./app
+# Copy application code
+COPY app/ ./app/
+COPY .env* ./
 
-# Create user
-RUN useradd -m appuser && chown -R appuser:appuser /app
+# Create a non-root user for security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
 # Expose port
-EXPOSE 7860
+EXPOSE 8080
 
-# Simple startup
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV GRADIO_SERVER_NAME=0.0.0.0
+ENV GRADIO_SERVER_PORT=8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run the application
 CMD ["python", "app/app.py"]

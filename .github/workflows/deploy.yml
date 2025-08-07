@@ -1,49 +1,56 @@
-name: Deploy to Google Cloud Run - Stage 1
-
+name: Deploy to Google Cloud Run
 on:
   push:
-    branches:
-      - main
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GAR_LOCATION: ${{ secrets.GCP_REGION }}
+  SERVICE: video-vault  # Changed to match your existing setup
+  REGION: ${{ secrets.GCP_REGION }}
 
 jobs:
   deploy:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-    - name: Set up Cloud SDK
-      uses: google-github-actions/setup-gcloud@v2
-
-    - name: Configure Docker for Artifact Registry
-      run: |
-        gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
-
-    - name: Build and Push Docker image
-      run: |
-        docker build -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1 .
-        docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1
-
-    - name: Deploy to Cloud Run - Stage 1
-      run: |
-        gcloud run deploy video-vault \
-          --image ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/video-vault/video-vault:stage1 \
-          --platform managed \
-          --region ${{ secrets.GCP_REGION }} \
-          --allow-unauthenticated \
-          --port 7860 \
-          --memory 2Gi \
-          --cpu 1 \
-          --timeout 300 \
-          --concurrency 10 \
-          --max-instances 5 \
-          --min-instances 0 \
-          --execution-environment gen2 \
-          --cpu-throttling \
-          --set-env-vars STAGE=1
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          
+      - name: Docker Auth
+        id: docker-auth
+        uses: 'docker/login-action@v3'
+        with:
+          registry: '${{ secrets.GCP_REGION }}-docker.pkg.dev'
+          username: _json_key
+          password: '${{ secrets.GCP_SA_KEY }}'
+          
+      - name: Build and Push Container
+        run: |-
+          docker build -t "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.SERVICE }}:${{ github.sha }}" ./
+          docker push "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.SERVICE }}:${{ github.sha }}"
+          
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.SERVICE }}/${{ env.SERVICE }}:${{ github.sha }}
+          flags: '--allow-unauthenticated --port=7860 --memory=4Gi --timeout=600 --concurrency=1 --max-instances=1'
+          env_vars: |
+            GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
+            YOUTUBE_API_KEY=${{ secrets.YOUTUBE_API_KEY }}
+            
+      - name: Show Output
+        run: echo ${{ steps.deploy.outputs.url }}
