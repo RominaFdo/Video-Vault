@@ -1,3 +1,5 @@
+
+# Updated deploy.yml with ScraperAPI key
 name: Deploy to Google Cloud Run
 on:
   push:
@@ -51,6 +53,7 @@ jobs:
           env_vars: |
             GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}
             YOUTUBE_API_KEY=${{ secrets.YOUTUBE_API_KEY }}
+            SCRAPERAPI_KEY=${{ secrets.SCRAPERAPI_KEY }}
             
       - name: Show Output
         run: echo ${{ steps.deploy.outputs.url }}

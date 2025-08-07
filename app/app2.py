@@ -19,29 +19,21 @@ from langchain.embeddings import SentenceTransformerEmbeddings
 from langchain.memory import ConversationBufferWindowMemory
 import os
 from dotenv import load_dotenv
-import requests
-import time
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
 load_dotenv()
 
-# Environment variables
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-SCRAPERAPI_KEY = os.getenv("SCRAPERAPI_KEY")  # Add this to your environment
-
 if not GOOGLE_API_KEY or not YOUTUBE_API_KEY:
     raise ValueError("Please set GOOGLE_API_KEY and YOUTUBE_API_KEY in your .env file")
 
-if not SCRAPERAPI_KEY:
-    print("Warning: SCRAPERAPI_KEY not set. Transcript fetching may fail due to IP blocking.")
 
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 API_KEY = YOUTUBE_API_KEY
 genai.configure(api_key=GOOGLE_API_KEY)
+os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3, google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-pro", temperature=0.3,  google_api_key=GOOGLE_API_KEY)
 embedding_model = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
 global_qa_chain = None
@@ -55,260 +47,6 @@ except Exception as e:
     print(f"Model loading error: {e}")
     sentiment_pipe = None
     model = None
-
-def create_session_with_retry():
-    """Create a requests session with retry strategy"""
-    session = requests.Session()
-    
-    retry_strategy = Retry(
-        total=3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        method_whitelist=["HEAD", "GET", "OPTIONS"],
-        backoff_factor=1
-    )
-    
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    return session
-
-def fetch_transcript_with_scraperapi(video_id):
-    """Fetch transcript using ScraperAPI as proxy"""
-    if not SCRAPERAPI_KEY:
-        return "Error: ScraperAPI key not configured. Please set SCRAPERAPI_KEY environment variable."
-    
-    if not video_id:
-        return "Error: Invalid video ID provided."
-    
-    try:
-        # ScraperAPI endpoint
-        scraperapi_url = "http://api.scraperapi.com"
-        
-        # YouTube transcript API endpoint (we'll scrape the transcript page)
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        params = {
-            'api_key': SCRAPERAPI_KEY,
-            'url': youtube_url,
-            'render': 'false',  # Set to true if you need JavaScript rendering
-            'country_code': 'us'  # Use US proxy
-        }
-        
-        session = create_session_with_retry()
-        
-        # First, let's try the direct transcript API approach with proxy
-        try:
-            # Use ScraperAPI as HTTP proxy for youtube-transcript-api
-            proxies = {
-                'http': f'http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001',
-                'https': f'http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001'
-            }
-            
-            # Try with the original youtube-transcript-api but through proxy
-            ytt_api = YouTubeTranscriptApi()
-            transcript = ytt_api.fetch(video_id, proxies=proxies)
-            # transcript = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxies)
-            if transcript:
-                formatter = TextFormatter()
-                result = formatter.format_transcript(transcript)
-                return result if result else "Error: Empty transcript from direct proxy method"
-            else:
-                return "Error: No transcript data from direct proxy method"
-            
-        except Exception as proxy_error:
-            print(f"Direct proxy approach failed: {proxy_error}")
-            
-            # Fallback: Scrape transcript data from YouTube page
-            try:
-                response = session.get(scraperapi_url, params=params, timeout=30)
-                
-                if response.status_code == 200:
-                    # Extract transcript from the scraped HTML
-                    html_content = response.text
-                    
-                    if not html_content:
-                        return "Error: Empty response from ScraperAPI"
-                    
-                    # Look for transcript data in the page
-                    transcript_pattern = r'"transcriptRenderer".*?"runs":\s*(\[.*?\])'
-                    match = re.search(transcript_pattern, html_content, re.DOTALL)
-                    
-                    if match:
-                        try:
-                            runs_data = json.loads(match.group(1))
-                            transcript_text = ""
-                            
-                            for run in runs_data:
-                                if 'text' in run:
-                                    transcript_text += run['text'] + " "
-                            
-                            if transcript_text.strip():
-                                return transcript_text.strip()
-                            else:
-                                return "Error: No transcript text found in scraped data"
-                                
-                        except json.JSONDecodeError as json_error:
-                            return f"Error: Failed to parse transcript data - {str(json_error)}"
-                    else:
-                        # Try alternative patterns or methods
-                        return fetch_transcript_alternative_method(html_content, video_id)
-                else:
-                    return f"Error: ScraperAPI request failed with status code: {response.status_code}"
-                    
-            except Exception as scrape_error:
-                return f"Error: Failed to scrape with ScraperAPI - {str(scrape_error)}"
-                
-    except Exception as e:
-        return f"Error: Exception in ScraperAPI transcript fetch - {str(e)}"
-
-def fetch_transcript_alternative_method(html_content, video_id):
-    """Alternative method to extract transcript from HTML content"""
-    if not html_content:
-        return "Error: No HTML content provided for alternative extraction"
-        
-    try:
-        # Look for captions/subtitle data in various formats
-        patterns = [
-            r'"captions".*?"playerCaptionsTracklistRenderer".*?"captionTracks":\s*(\[.*?\])',
-            r'"subtitlesTrack".*?"baseUrl":"([^"]+)"',
-            r'"captionTracks":\s*(\[.*?\])'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, html_content, re.DOTALL)
-            if match:
-                try:
-                    # Try to extract and process the caption data
-                    caption_data = match.group(1) if match.lastindex >= 1 else match.group(0)
-                    
-                    if 'baseUrl' in caption_data:
-                        # Extract the subtitle URL and fetch it
-                        url_match = re.search(r'"baseUrl":"([^"]+)"', caption_data)
-                        if url_match:
-                            subtitle_url = url_match.group(1).replace('\\u0026', '&')
-                            return fetch_subtitle_from_url(subtitle_url)
-                            
-                except Exception as parse_error:
-                    print(f"Pattern parsing error: {parse_error}")
-                    continue
-        
-        return "Error: No transcript found in video page. Video may not have captions enabled."
-        
-    except Exception as e:
-        return f"Error: Alternative transcript extraction failed - {str(e)}"
-
-def fetch_subtitle_from_url(subtitle_url):
-    """Fetch and parse subtitle content from URL"""
-    if not subtitle_url:
-        return "Error: No subtitle URL provided"
-        
-    try:
-        if not SCRAPERAPI_KEY:
-            return "Error: ScraperAPI key required for subtitle fetching"
-            
-        params = {
-            'api_key': SCRAPERAPI_KEY,
-            'url': subtitle_url
-        }
-        
-        session = create_session_with_retry()
-        response = session.get("http://api.scraperapi.com", params=params, timeout=30)
-        
-        if response.status_code == 200:
-            # Parse XML subtitle content
-            subtitle_content = response.text
-            
-            if not subtitle_content:
-                return "Error: Empty subtitle content received"
-            
-            # Extract text from XML format
-            import xml.etree.ElementTree as ET
-            try:
-                root = ET.fromstring(subtitle_content)
-                transcript_text = ""
-                
-                for text_element in root.findall('.//text'):
-                    if text_element.text:
-                        transcript_text += text_element.text + " "
-                
-                if transcript_text.strip():
-                    return transcript_text.strip()
-                else:
-                    return "Error: No text found in subtitle file"
-                
-            except ET.ParseError as xml_error:
-                # Try regex extraction if XML parsing fails
-                try:
-                    text_pattern = r'<text[^>]*>(.*?)</text>'
-                    matches = re.findall(text_pattern, subtitle_content, re.DOTALL | re.IGNORECASE)
-                    
-                    if matches:
-                        transcript_text = " ".join([re.sub(r'<[^>]+>', '', match) for match in matches])
-                        return transcript_text.strip() if transcript_text.strip() else "Error: Empty transcript after regex extraction"
-                    else:
-                        return f"Error: Failed to extract text from subtitle content. XML parse error: {str(xml_error)}"
-                except Exception as regex_error:
-                    return f"Error: Both XML parsing and regex extraction failed. XML error: {str(xml_error)}, Regex error: {str(regex_error)}"
-        else:
-            return f"Error: Failed to fetch subtitle content. Status code: {response.status_code}"
-            
-    except Exception as e:
-        return f"Error: Exception in fetching subtitle from URL - {str(e)}"
-
-def fetch_transcript(video_id):
-    """Main transcript fetching function with fallback methods"""
-    if not video_id:
-        return "Error: Invalid video ID"
-        
-    try:
-        # Method 1: Try direct youtube-transcript-api first (for local development)
-        if not SCRAPERAPI_KEY:
-            try:
-                ytt_api = YouTubeTranscriptApi()
-                transcript = ytt_api.fetch(video_id, languages=['en'])
-                formatter = TextFormatter()
-                result = formatter.format_transcript(transcript)
-                return result if result else "Error: Empty transcript returned"
-            except Exception as e:
-                print(f"Direct method failed: {e}")
-                return f"Error: Direct transcript fetch failed - {str(e)}"
-    except Exception as direct_error:
-        print(f"Direct method setup failed: {direct_error}")
-        
-    # Method 2: Use ScraperAPI
-    if SCRAPERAPI_KEY:
-        try:
-            scraperapi_result = fetch_transcript_with_scraperapi(video_id)
-            if scraperapi_result and not scraperapi_result.startswith("Error") and not scraperapi_result.startswith("ScraperAPI"):
-                return scraperapi_result
-            else:
-                print(f"ScraperAPI method failed: {scraperapi_result}")
-        except Exception as scraper_error:
-            print(f"ScraperAPI method error: {scraper_error}")
-    
-    # Method 3: Try with different error handling for youtube-transcript-api
-    try:
-        ytt_api = YouTubeTranscriptApi()
-        transcript = ytt_api.fetch(video_id, languages=['en'])
-        # transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        if transcript:
-            formatter = TextFormatter()
-            result = formatter.format_transcript(transcript)
-            return result if result else "Error: Empty transcript after formatting"
-        else:
-            return "Error: No transcript data retrieved"
-    except TranscriptsDisabled:
-        return "Error: Transcripts are disabled for this video"
-    except NoTranscriptFound:
-        return "Error: No transcript found (even auto-generated)"
-    except VideoUnavailable:
-        return "Error: Video unavailable"
-    except Exception as e:
-        error_message = str(e)
-        if "blocked" in error_message.lower() or "ip" in error_message.lower():
-            return f"Error: IP blocked by YouTube. ScraperAPI integration needed - {error_message}"
-        return f"Error: {error_message}"
 
 def search_youtube(query, max_results=5):
     """Search YouTube videos and return results"""
@@ -374,6 +112,21 @@ def extract_video_id(url):
         return url.split("/")[-1]
     return None
 
+def fetch_transcript(video_id):
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        transcript = ytt_api.fetch(video_id, languages=['en'])
+        formatter = TextFormatter()
+        return formatter.format_transcript(transcript)
+    except TranscriptsDisabled:
+        return "Transcripts are disabled for this video."
+    except NoTranscriptFound:
+        return "No transcript found (even auto)."
+    except VideoUnavailable:
+        return "Video unavailable."
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 def get_metadata_only(video_url):
     try:
         cmd = ['yt-dlp', '--dump-json', '--no-download', video_url]
@@ -401,77 +154,47 @@ def process_youtube_url(url):
 
     video_id = extract_video_id(url)
     if not video_id:
-        return "Invalid YouTube URL", {}, "", "Invalid URL - QA chatbot not ready"
+        return "Invalid YouTube URL", {}, "", None
 
     transcript = fetch_transcript(video_id)
     metadata = get_metadata_only(url)
 
-    # Handle None transcript
-    if transcript is None:
-        transcript = "Error: No transcript could be retrieved"
-
     # Store video title for context
     current_video_title = metadata.get('title', 'Unknown Video') if isinstance(metadata, dict) else 'Unknown Video'
 
-    # Check if transcript is valid and usable
-    transcript_is_valid = (
-        isinstance(transcript, str) and 
-        transcript.strip() and
-        not transcript.startswith("Error") and 
-        not transcript.startswith("Transcripts are disabled") and 
-        not transcript.startswith("No transcript") and 
-        not transcript.startswith("Video unavailable") and 
-        not transcript.startswith("IP blocked") and
-        not transcript.startswith("ScraperAPI")
-    )
+    if isinstance(transcript, str) and not "Error" in transcript:
+        # Split transcript into chunks
+        splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=64)
+        chunks = splitter.split_text(transcript)
 
-    if transcript_is_valid:
-        try:
-            # Split transcript into chunks
-            splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=64)
-            chunks = splitter.split_text(transcript)
+        # Create vector store
+        vector_store = FAISS.from_texts(chunks, embedding_model)
 
-            if not chunks:
-                raise ValueError("No chunks created from transcript")
+        # Initialize conversation memory with a window of last 10 exchanges
+        global_memory = ConversationBufferWindowMemory(
+            k=10,  # Keep last 10 conversation turns
+            memory_key="chat_history",
+            output_key="answer",
+            return_messages=True
+        )
 
-            # Create vector store
-            vector_store = FAISS.from_texts(chunks, embedding_model)
+        # Create conversational retrieval chain with memory
+        global_qa_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
+            memory=global_memory,
+            return_source_documents=True,
+            verbose=True
+        )
 
-            # Initialize conversation memory with a window of last 10 exchanges
-            global_memory = ConversationBufferWindowMemory(
-                k=10,  # Keep last 10 conversation turns
-                memory_key="chat_history",
-                output_key="answer",
-                return_messages=True
-            )
-
-            # Create conversational retrieval chain with memory
-            global_qa_chain = ConversationalRetrievalChain.from_llm(
-                llm=llm,
-                retriever=vector_store.as_retriever(search_kwargs={"k": 3}),
-                memory=global_memory,
-                return_source_documents=True,
-                verbose=True
-            )
-
-            status_message = f"✅ QA chatbot is ready! You can now ask questions about '{current_video_title}'"
-        except Exception as e:
-            global_qa_chain = None
-            global_memory = None
-            status_message = f"❌ QA setup failed: {str(e)}"
+        status_message = f"QA chatbot is ready! You can now ask questions about '{current_video_title}'"
     else:
         global_qa_chain = None
         global_memory = None
         current_video_title = ""
-        # Safe string slicing with None check
-        transcript_preview = str(transcript)[:100] if transcript else "No transcript available"
-        status_message = f"❌ QA chatbot not ready. Issue: {transcript_preview}..."
+        status_message = "QA chatbot is not ready. No transcript found."
 
-    # Safe transcript preview
-    if isinstance(transcript, str) and len(transcript) > 500:
-        short_transcript = transcript[:500] + "..."
-    else:
-        short_transcript = str(transcript) if transcript else "No transcript available"
+    short_transcript = transcript[:500] + "..." if isinstance(transcript, str) and len(transcript) > 500 else transcript
 
     return transcript, metadata, short_transcript, status_message
 
@@ -659,39 +382,27 @@ def analyze_with_anchors(video_url, transcript):
     """Generate anchor analysis for comments"""
     global stored_anchor_dict, stored_matched_results
 
-    # Handle None or invalid transcript
-    if not transcript or transcript is None:
-        return "Error: No transcript available for anchor analysis. Please extract transcript first in Step 2.", "No analysis available"
-    
-    transcript_str = str(transcript)
-    if (transcript_str.startswith("Error") or 
-        "No transcript" in transcript_str or 
-        transcript_str.startswith("Invalid") or
-        len(transcript_str.strip()) < 10):
-        return f"Error: Need valid transcript for anchor analysis. Current status: {transcript_str[:100]}...", "No analysis available"
+    if not transcript or "No transcript" in transcript:
+        return "Need transcript for anchor analysis. Please extract transcript first in Step 2.", "No analysis available"
 
     if not stored_comments:
-        return "Error: Need comments first. Please fetch comments using 'Get Comments' button.", "No analysis available"
+        return "Need comments first. Please fetch comments using 'Get Comments' button.", "No analysis available"
+
+    anchor_output = generate_summary_and_anchors(transcript)
+    cleaned_output = clean_gemini_output(anchor_output)
 
     try:
-        anchor_output = generate_summary_and_anchors(transcript_str)
-        if not anchor_output or anchor_output.startswith("Error"):
-            return f"Error: Failed to generate anchor analysis - {anchor_output}", "Analysis failed"
-            
-        cleaned_output = clean_gemini_output(anchor_output)
+        stored_anchor_dict = json.loads(cleaned_output)
 
-        try:
-            stored_anchor_dict = json.loads(cleaned_output)
+        stored_matched_results = match_comments_to_anchors(stored_comments, stored_anchor_dict)
 
-            stored_matched_results = match_comments_to_anchors(stored_comments, stored_anchor_dict)
+        category_counts = {"relevant": 0, "irrelevant": 0, "spammy": 0}
+        for result in stored_matched_results:
+            category = result.get('category', 'unknown')
+            if category in category_counts:
+                category_counts[category] += 1
 
-            category_counts = {"relevant": 0, "irrelevant": 0, "spammy": 0}
-            for result in stored_matched_results:
-                category = result.get('category', 'unknown')
-                if category in category_counts:
-                    category_counts[category] += 1
-
-            summary_text = f"""✅ Analysis Complete!
+        summary_text = f"""Analysis Complete!
 
 Categorization Summary:
 - 🎯 Relevant: {category_counts['relevant']} comments
@@ -701,20 +412,17 @@ Categorization Summary:
 Generated Anchor Patterns:
 {json.dumps(stored_anchor_dict, indent=2)}"""
 
-            instructions = """✅ Analysis ready!
+        instructions = """Analysis ready!
 
 Now select any comment from the dropdown above to see:
 - Detailed sentiment analysis
 - AI categorization with similarity score
 - Explanation of why it was categorized that way"""
 
-            return summary_text, instructions
+        return summary_text, instructions
 
-        except json.JSONDecodeError as e:
-            return f"Error: JSON parsing failed - {str(e)}\n\nRaw output:\n{cleaned_output}", "Analysis failed"
-            
-    except Exception as e:
-        return f"Error: Exception in anchor analysis - {str(e)}", "Analysis failed"
+    except json.JSONDecodeError as e:
+        return f"JSON Error: {e}\n\nRaw output:\n{cleaned_output}", "Analysis failed"
 
 def respond(message, chat_history):
     """Handle chat responses with memory"""
@@ -780,8 +488,6 @@ with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
     gr.Markdown("""
     # 🎬 YouTube Video Analyzer
     Easily analyze YouTube videos for transcripts, metadata, sentiment, viewer comment quality and chat with data!
-    
-    **🚀 Now with ScraperAPI integration to bypass IP blocking!**
 
     ---
     """)
@@ -999,6 +705,9 @@ with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
             - **Source References**: Answers include information about which parts of the transcript were used
             - **Memory Window**: Keeps track of your last 10 conversation exchanges
             """)
+
+# if __name__ == "__main__":
+#     demo.launch(debug=True)
 
 # Add this at the very end of your app.py file, replacing the existing launch line:
 
