@@ -1,17 +1,17 @@
-# 📽️Video Vault: AI-Powered YouTube Intelligence Agent
+# Video Vault: AI-Powered YouTube Intelligence Agent
 Video Vault is a multimodal, LLM-powered YouTube Analyzer built to deeply understand and interact with video content. From intelligent transcript summarization to sentiment-aware comment filtering and chatbot-style Q&A, this system brings together cutting-edge NLP, LLMs, and DevOps best practices into one scalable application.
 
 ## Features
 
 | Module | Description |
 | --- | --- |
-| 🔎 Video Search | Find YouTube videos via keyword queries |
-| 📄 Transcript Fetching | Pull full video transcripts (via YouTubeTranscriptAPI) |
-| 🤖 Chatbot Q&A | Perform sentiment analysis & classify comments
-| 🧠 Context-Aware Memory | Chatbot retains past context and adjusts responses |
-| 🧩 Relevance Filtering | Categorize comments as: Relevant, Spam, or Irrelevant |
-| 🌐 Web UI	 | Gradio-based multi-tab interface |
-| 🧰 CI/CD + GCP | Dockerized + GitHub Actions + Google Cloud Run |
+| Video Search | Find YouTube videos via keyword queries |
+| Transcript Fetching | Pull full video transcripts (via YouTubeTranscriptAPI) |
+| Chatbot Q&A | Perform sentiment analysis & classify comments
+| Context-Aware Memory | Chatbot retains past context and adjusts responses |
+| Relevance Filtering | Categorize comments as: Relevant, Spam, or Irrelevant |
+| Web UI	 | Gradio-based multi-tab interface |
+| CI/CD + GCP | Dockerized + GitHub Actions + Google Cloud Run |
 
 ## Architecture Overview
 ```
