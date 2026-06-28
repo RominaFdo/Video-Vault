@@ -24,6 +24,7 @@ Built using Gradio, Gemini Pro 2.5, LangChain, and FAISS.
 
 ```bash
 pip install -r requirements.txt
+cd app
 python app.py
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference

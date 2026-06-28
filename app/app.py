@@ -73,94 +73,6 @@ def create_session_with_retry():
     
     return session
 
-# def fetch_transcript_with_scraperapi(video_id):
-#     """Fetch transcript using ScraperAPI as proxy"""
-#     if not SCRAPERAPI_KEY:
-#         return "Error: ScraperAPI key not configured. Please set SCRAPERAPI_KEY environment variable."
-    
-#     if not video_id:
-#         return "Error: Invalid video ID provided."
-    
-#     try:
-#         # ScraperAPI endpoint
-#         scraperapi_url = "http://api.scraperapi.com"
-        
-#         # YouTube transcript API endpoint (we'll scrape the transcript page)
-#         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-#         params = {
-#             'api_key': SCRAPERAPI_KEY,
-#             'url': youtube_url,
-#             'render': 'false',  # Set to true if you need JavaScript rendering
-#             'country_code': 'us'  # Use US proxy
-#         }
-        
-#         session = create_session_with_retry()
-        
-#         # First, let's try the direct transcript API approach with proxy
-#         try:
-#             # Use ScraperAPI as HTTP proxy for youtube-transcript-api
-#             proxies = {
-#                 'http': f'http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001',
-#                 'https': f'http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001'
-#             }
-            
-#             # Try with the original youtube-transcript-api but through proxy
-#             ytt_api = YouTubeTranscriptApi()
-#             transcript = ytt_api.fetch(video_id, proxies=proxies)
-#             # transcript = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxies)
-#             if transcript:
-#                 formatter = TextFormatter()
-#                 result = formatter.format_transcript(transcript)
-#                 return result if result else "Error: Empty transcript from direct proxy method"
-#             else:
-#                 return "Error: No transcript data from direct proxy method"
-            
-#         except Exception as proxy_error:
-#             print(f"Direct proxy approach failed: {proxy_error}")
-            
-#             # Fallback: Scrape transcript data from YouTube page
-#             try:
-#                 response = session.get(scraperapi_url, params=params, timeout=30)
-                
-#                 if response.status_code == 200:
-#                     # Extract transcript from the scraped HTML
-#                     html_content = response.text
-                    
-#                     if not html_content:
-#                         return "Error: Empty response from ScraperAPI"
-                    
-#                     # Look for transcript data in the page
-#                     transcript_pattern = r'"transcriptRenderer".*?"runs":\s*(\[.*?\])'
-#                     match = re.search(transcript_pattern, html_content, re.DOTALL)
-                    
-#                     if match:
-#                         try:
-#                             runs_data = json.loads(match.group(1))
-#                             transcript_text = ""
-                            
-#                             for run in runs_data:
-#                                 if 'text' in run:
-#                                     transcript_text += run['text'] + " "
-                            
-#                             if transcript_text.strip():
-#                                 return transcript_text.strip()
-#                             else:
-#                                 return "Error: No transcript text found in scraped data"
-                                
-#                         except json.JSONDecodeError as json_error:
-#                             return f"Error: Failed to parse transcript data - {str(json_error)}"
-#                     else:
-#                         # Try alternative patterns or methods
-#                         return fetch_transcript_alternative_method(html_content, video_id)
-#                 else:
-#                     return f"Error: ScraperAPI request failed with status code: {response.status_code}"
-                    
-#             except Exception as scrape_error:
-#                 return f"Error: Failed to scrape with ScraperAPI - {str(scrape_error)}"
-                
-#     except Exception as e:
-#         return f"Error: Exception in ScraperAPI transcript fetch - {str(e)}"
 def fetch_transcript_with_scraperapi(video_id):
     """
     Fetches a YouTube transcript by using ScraperAPI to proxy a request
@@ -849,8 +761,6 @@ with gr.Blocks(theme="soft", title="🎬 YouTube Video Analyzer") as demo:
     # YouTube Video Analyzer
     Easily analyze YouTube videos for transcripts, metadata, sentiment, viewer comment quality and chat with data!
     
-    **Now with ScraperAPI integration to bypass IP blocking!**
-
     ---
     """)
 
