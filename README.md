@@ -32,7 +32,7 @@ GCP (Cloud Run, GitHub Actions)
 
 ## Tech Stack
 - **Frontend/UI:** Gradio
-- ** LLMs & Chains: **Google Gemini Pro / Gemini Flash, LangChain (memory, tools, prompt chaining)
+- **LLMs & Chains:** Google Gemini Pro / Gemini Flash, LangChain (memory, tools, prompt chaining)
 - **NLP Models:** Sentence Embedding: sentence-transformers/all-MiniLM-L6-v2
 - **Sentiment Analysis:** distilbert-base-uncased-finetuned-sst-2-english
 - **Vector DB:** FAISS
